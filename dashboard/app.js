@@ -1,72 +1,105 @@
-// dashboard/app.js — Semantic 3DGS viewer (real API only)
+// dashboard/app.js — Semantic 4DGS v3
 /* global THREE, Chart */
+'use strict';
 
+// ── Three.js globals ──────────────────────────────────────────────────────────
 let scene, camera, renderer, controls, pointsMesh = null;
-let sceneData = null;          // {xyz, labels, confidence, label_names, mode}
+let sceneData = null;
 let ablationChart = null;
-const visibleObjects = new Set(); // empty = show all
+const visibleObjects = new Set();
 let minConfidence = 0.0;
 
+// ── Label colour palette ──────────────────────────────────────────────────────
 const PALETTE = [
-  [230, 25, 75], [60, 180, 75], [255, 225, 25], [0, 130, 200],
-  [245, 130, 48], [145, 30, 180], [70, 240, 240], [240, 50, 230],
-  [210, 245, 60], [250, 190, 212], [0, 128, 128], [220, 190, 255],
+  [56, 189, 248], [52, 211, 153], [251, 191, 36],  [248, 113, 113],
+  [167, 139, 250],[251, 146,  60],[34,  211, 238],  [244, 114, 182],
+  [163, 230,  53],[129, 140, 248],[250, 204,  21],  [74,  222, 128],
 ];
-const UNKNOWN_COLOR = [120, 120, 120];
+const UNKNOWN_COLOR = [80, 90, 110];
 
-// ------------------------------------------------------------ helpers
-const $ = (id) => document.getElementById(id);
+const $ = id => document.getElementById(id);
 
+// ── Tab switching ─────────────────────────────────────────────────────────────
+function switchTab(name) {
+  document.querySelectorAll('.ntab').forEach(b =>
+    b.classList.toggle('active', b.dataset.tab === name));
+  document.querySelectorAll('.tab-pane').forEach(p =>
+    p.classList.toggle('active', p.id === `tab-${name}`));
+  if (name === 'viewer3d') setTimeout(onResize, 60);
+}
+
+function initTabs() {
+  document.querySelectorAll('.ntab').forEach(btn =>
+    btn.addEventListener('click', () => switchTab(btn.dataset.tab)));
+}
+
+// expose for inline onclick in HTML
+window.switchTab = switchTab;
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
 function toast(msg, ok = false) {
   const el = $('toast');
   el.textContent = msg;
-  el.classList.toggle('ok', ok);
+  el.className = ok ? 'ok' : '';
   el.hidden = false;
   clearTimeout(el._t);
   el._t = setTimeout(() => { el.hidden = true; }, 5000);
 }
 
-function labelColor(label) {
-  if (label < 0) return UNKNOWN_COLOR;
-  return PALETTE[label % PALETTE.length];
-}
-
+// ── API helper ────────────────────────────────────────────────────────────────
 async function api(path, opts) {
-  const res = await fetch(path, opts);
+  const res  = await fetch(path, opts);
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
 }
 
-// ------------------------------------------------------------ three.js
+function labelColor(label) {
+  return label < 0 ? UNKNOWN_COLOR : PALETTE[label % PALETTE.length];
+}
+
+// ── Three.js init ─────────────────────────────────────────────────────────────
 function initThree() {
   const container = $('canvas-container');
-  const w = container.clientWidth, h = container.clientHeight;
+  const w = container.clientWidth  || 900;
+  const h = container.clientHeight || 600;
+
   scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x0b0d12);
+  scene.background = new THREE.Color(0x050710);
+  scene.fog = new THREE.FogExp2(0x050710, 0.016);
 
-  camera = new THREE.PerspectiveCamera(55, w / h, 0.05, 500);
-  camera.position.set(0, 1.2, 5);
+  camera = new THREE.PerspectiveCamera(58, w / h, 0.01, 1000);
+  camera.position.set(0, 2, 7);
 
-  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
   renderer.setSize(w, h);
-  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   container.appendChild(renderer.domElement);
 
   controls = new THREE.OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
+  controls.dampingFactor = 0.055;
+  controls.minDistance  = 0.3;
+  controls.maxDistance  = 500;
 
-  const grid = new THREE.GridHelper(10, 20, 0x1e293b, 0x0f172a);
+  // Grid
+  const grid = new THREE.GridHelper(24, 48, 0x151c2e, 0x0d1220);
+  grid.material.opacity     = 0.55;
+  grid.material.transparent = true;
   scene.add(grid);
-  scene.add(new THREE.AmbientLight(0xffffff, 0.9));
 
-  window.addEventListener('resize', () => {
-    const cw = container.clientWidth, ch = container.clientHeight;
-    camera.aspect = cw / ch;
-    camera.updateProjectionMatrix();
-    renderer.setSize(cw, ch);
-  });
+  // Lights
+  scene.add(new THREE.AmbientLight(0xffffff, 1.1));
+  const dir = new THREE.DirectionalLight(0x7dd3fc, 0.5);
+  dir.position.set(5, 10, 5);
+  scene.add(dir);
 
+  // Axes
+  const axes = new THREE.AxesHelper(0.6);
+  axes.position.set(-11, 0, -11);
+  scene.add(axes);
+
+  window.addEventListener('resize', onResize);
   (function animate() {
     requestAnimationFrame(animate);
     controls.update();
@@ -74,12 +107,31 @@ function initThree() {
   })();
 }
 
-function sceneCenter(xyz) {
+function onResize() {
+  const c = $('canvas-container');
+  if (!c || !renderer) return;
+  const w = c.clientWidth, h = c.clientHeight;
+  if (!w || !h) return;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+}
+
+// ── Point cloud ───────────────────────────────────────────────────────────────
+function cloudCenter(xyz) {
   if (!xyz.length) return [0, 0, 0];
-  const n = xyz.length;
   const c = [0, 0, 0];
-  for (const p of xyz) { c[0] += p[0]; c[1] += p[1]; c[2] += p[2]; }
-  return c.map(v => v / n);
+  xyz.forEach(p => { c[0] += p[0]; c[1] += p[1]; c[2] += p[2]; });
+  return c.map(v => v / xyz.length);
+}
+
+function cloudRadius(xyz, ctr) {
+  let mx = 0;
+  xyz.forEach(p => {
+    const d = Math.hypot(p[0]-ctr[0], p[1]-ctr[1], p[2]-ctr[2]);
+    if (d > mx) mx = d;
+  });
+  return mx || 5;
 }
 
 function updatePointCloud() {
@@ -93,118 +145,179 @@ function updatePointCloud() {
     pointsMesh = null;
   }
 
+  // Hide empty overlay once we have data
+  const ov = $('scene-empty-overlay');
+  if (ov) ov.style.display = 'none';
+
   const positions = [], colors = [];
   let shown = 0;
+
   for (let i = 0; i < xyz.length; i++) {
     if (confidence[i] < minConfidence) continue;
     const lab = labels[i];
     if (visibleObjects.size > 0 && !visibleObjects.has(lab)) continue;
     positions.push(xyz[i][0], xyz[i][1], xyz[i][2]);
     const c = labelColor(lab);
-    colors.push(c[0] / 255, c[1] / 255, c[2] / 255);
+    colors.push(c[0]/255, c[1]/255, c[2]/255);
     shown++;
   }
 
+  if (shown === 0) { $('stat-shown').textContent = '0'; return; }
+
+  const ctr  = cloudCenter(xyz);
+  const r    = cloudRadius(xyz, ctr);
+  const pSz  = Math.max(0.007, Math.min(0.055, r / 70));
+
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-  const mat = new THREE.PointsMaterial({ size: 0.02, vertexColors: true, opacity: 0.92, transparent: true });
+  geo.setAttribute('color',    new THREE.Float32BufferAttribute(colors, 3));
+
+  const mat = new THREE.PointsMaterial({
+    size: pSz, vertexColors: true,
+    opacity: 0.96, transparent: true, sizeAttenuation: true,
+  });
+
   pointsMesh = new THREE.Points(geo, mat);
   scene.add(pointsMesh);
-
-  $('stat-shown').textContent = shown;
+  $('stat-shown').textContent = shown.toLocaleString();
 }
 
 function frameCamera(view) {
-  if (!sceneData) return;
-  const c = sceneCenter(sceneData.xyz);
-  controls.target.set(c[0], c[1], c[2]);
-  if (view === 'top') camera.position.set(c[0], Math.max(c[1] + 4, 4), c[2] + 0.001);
-  else if (view === 'side') camera.position.set(c[0] + 5, c[1], c[2]);
-  else camera.position.set(c[0] + 2.2, c[1] + 1.4, c[2] + 3.4);
+  if (!sceneData?.xyz?.length) return;
+  const ctr = cloudCenter(sceneData.xyz);
+  const r   = cloudRadius(sceneData.xyz, ctr);
+  controls.target.set(...ctr);
+  if (view === 'top')
+    camera.position.set(ctr[0], ctr[1] + r * 2.0, ctr[2] + 0.001);
+  else if (view === 'side')
+    camera.position.set(ctr[0] + r * 2.0, ctr[1], ctr[2]);
+  else
+    camera.position.set(ctr[0] + r * 0.9, ctr[1] + r * 0.65, ctr[2] + r * 1.5);
   controls.update();
+
+  ['btn-view-orbit','btn-view-top','btn-view-side'].forEach(id => {
+    const el = $(id); if (el) el.classList.remove('active');
+  });
+  const map = { orbit:'btn-view-orbit', top:'btn-view-top', side:'btn-view-side' };
+  if (map[view]) $(map[view])?.classList.add('active');
 }
 
-// ------------------------------------------------------------ data
-function renderScene(scene) {
-  sceneData = scene;
-  const names = scene.label_names || {};
+// ── Render scene data ─────────────────────────────────────────────────────────
+function renderScene(sd) {
+  sceneData = sd;
+  const names = sd.label_names || {};
 
-  $('mode-line').textContent = scene.mode === 'single_image_2.5d'
-    ? 'single-image 2.5D — real segmentation, plane-assumption depth (not reconstruction)'
-    : 'multi-view 2D→3D label transfer on Gaussian Splats';
+  $('mode-line') && ($('mode-line').textContent = sd.mode === 'single_image_2.5d'
+    ? 'single-image 2.5D — real segmentation, plane-assumption depth'
+    : 'multi-view 2D→3D label transfer on Gaussian Splats');
 
+  const modeEl = $('badge-mode');
+  if (modeEl) {
+    modeEl.textContent = `mode: ${sd.mode}`;
+    modeEl.className   = 'nbadge ' + (sd.mode === 'single_image_2.5d' ? 'warn' : 'ok');
+  }
+
+  const ids    = Object.keys(names).map(Number).sort((a,b) => a-b);
+  const counts = {};
+  for (const l of sd.labels) counts[l] = (counts[l] || 0) + 1;
+
+  // ─── 3D viewer object list ───
+  visibleObjects.clear();
   const list = $('object-list');
   list.innerHTML = '';
-  const ids = Object.keys(names).map(Number).sort((a, b) => a - b);
-  visibleObjects.clear();
-
-  const counts = {};
-  for (const l of scene.labels) counts[l] = (counts[l] || 0) + 1;
-
   for (const id of ids) {
-    const li = document.createElement('li');
-    const dot = document.createElement('span');
-    dot.className = 'dot';
-    const c = labelColor(id);
-    dot.style.background = `rgb(${c[0]},${c[1]},${c[2]})`;
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.value = names[id];
-    input.title = 'click to rename';
-    input.addEventListener('change', async () => {
+    const li  = document.createElement('li');
+    const dot = document.createElement('span'); dot.className = 'dot';
+    const c   = labelColor(id);
+    dot.style.background = `rgb(${c.join(',')})`;
+    dot.style.boxShadow  = `0 0 7px rgb(${c.join(',')})`;
+
+    const inp = document.createElement('input'); inp.type = 'text'; inp.value = names[id]; inp.title = 'Click to rename';
+    inp.addEventListener('change', async () => {
       try {
         const r = await api('/api/labels/rename', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id, label: input.value }),
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({id, label: inp.value}),
         });
-        sceneData = r.scene;
-        toast('renamed', true);
-      } catch (e) { toast(`rename failed: ${e.message}`); input.value = names[id]; }
+        sceneData = r.scene; toast('Renamed ✓', true);
+      } catch (e) { toast(`Rename failed: ${e.message}`); inp.value = names[id]; }
     });
-    const count = document.createElement('span');
-    count.className = 'count';
-    count.textContent = counts[id] || 0;
-    const vis = document.createElement('input');
-    vis.type = 'checkbox';
-    vis.checked = true;
-    vis.title = 'show/hide';
-    vis.addEventListener('change', () => {
-      if (vis.checked) visibleObjects.delete(id); else visibleObjects.add(id);
+
+    const cnt = document.createElement('span'); cnt.className = 'count';
+    cnt.textContent = (counts[id]||0).toLocaleString();
+
+    const chk = document.createElement('input'); chk.type = 'checkbox'; chk.checked = true;
+    chk.addEventListener('change', () => {
+      if (chk.checked) visibleObjects.delete(id); else visibleObjects.add(id);
       updatePointCloud();
     });
-    li.append(vis, dot, input, count);
+
+    li.append(chk, dot, inp, cnt);
     list.appendChild(li);
   }
 
-  $('stat-points').textContent = scene.n_points;
-  $('stat-objects').textContent = ids.length;
-  $('badge-mode').textContent = `mode: ${scene.mode}`;
-  $('badge-mode').className = 'badge ' + (scene.mode === 'single_image_2.5d' ? 'warn' : 'ok');
+  // ─── Segment tab object cards ───
+  const grid  = $('obj-grid');
+  const empty = $('seg-empty');
+  if (grid) {
+    grid.innerHTML = '';
+    if (!ids.length) { if (empty) empty.style.display = 'block'; }
+    else {
+      if (empty) empty.style.display = 'none';
+      for (const id of ids) {
+        const div  = document.createElement('div'); div.className = 'obj-card';
+        const dot  = document.createElement('div'); dot.className = 'dot';
+        const c    = labelColor(id);
+        dot.style.background = `rgb(${c.join(',')})`;
+        dot.style.boxShadow  = `0 0 12px rgb(${c.join(',')})`;
+        const name = document.createElement('div'); name.className = 'obj-card-name'; name.textContent = names[id];
+        const pts  = document.createElement('div'); pts.className  = 'obj-card-pts';  pts.textContent = `${(counts[id]||0).toLocaleString()} pts`;
+        div.append(dot, name, pts); grid.appendChild(div);
+      }
+    }
+  }
 
+  $('stat-points').textContent  = (sd.n_points||0).toLocaleString();
+  $('stat-objects').textContent = ids.length;
   updatePointCloud();
   frameCamera('orbit');
 }
 
+// ── Render metrics ────────────────────────────────────────────────────────────
 function renderMetrics(m) {
-  // ablation
   const ablation = m.ablation || [];
-  const labels = ablation.map(a => (a.name || a.strategy || '?').replace(/_/g, ' '));
-  const rates = ablation.map(a => +(a.label_rate * 100).toFixed(1));
+  const aLabels  = ablation.map(a => (a.name||a.strategy||'?').replace(/_/g,' '));
+  const aRates   = ablation.map(a => +(a.label_rate*100).toFixed(1));
 
   if (ablationChart) ablationChart.destroy();
   ablationChart = new Chart($('ablation-chart'), {
     type: 'bar',
     data: {
-      labels,
-      datasets: [{ data: rates, backgroundColor: ['#94a3b8aa', '#3b82f6aa', '#10b981cc'], borderWidth: 0 }],
+      labels: aLabels,
+      datasets: [{
+        data: aRates,
+        backgroundColor: ['rgba(56,189,248,.55)','rgba(129,140,248,.55)','rgba(52,211,153,.65)'],
+        borderColor:     ['rgb(56,189,248)',     'rgb(129,140,248)',     'rgb(52,211,153)'],
+        borderWidth: 1.5, borderRadius: 6,
+      }],
     },
     options: {
-      responsive: true, maintainAspectRatio: false,
-      scales: { y: { beginAtZero: true, max: 100, ticks: { color: '#9aa3b5' }, grid: { color: '#ffffff10' } },
-                x: { ticks: { color: '#9aa3b5' }, grid: { display: false } } },
-      plugins: { legend: { display: false } },
+      responsive:true, maintainAspectRatio:false,
+      scales:{
+        y:{ beginAtZero:true, max:100,
+            ticks:{color:'#5a6680',font:{size:11}},
+            grid: {color:'rgba(255,255,255,0.04)'} },
+        x:{ ticks:{color:'#9aa3b5',font:{size:11}},
+            grid:{display:false} },
+      },
+      plugins:{
+        legend:{display:false},
+        tooltip:{
+          backgroundColor:'#131829', borderColor:'rgba(255,255,255,.1)', borderWidth:1,
+          titleColor:'#e2e8f8', bodyColor:'#9aa3b5',
+          callbacks:{label: ctx => ` ${ctx.parsed.y}% labeled`},
+        },
+      },
     },
   });
 
@@ -212,22 +325,21 @@ function renderMetrics(m) {
   tbody.innerHTML = '';
   ablation.forEach(a => {
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${(a.name || a.strategy).replace(/_/g, ' ')}</td>
-      <td class="num">${a.n_labeled}/${a.n_gaussians}</td>
-      <td class="num">${(a.label_rate * 100).toFixed(1)}%</td>`;
+    tr.innerHTML = `<td>${(a.name||a.strategy||'').replace(/_/g,' ')}</td>
+      <td class="num">${a.n_labeled}</td><td class="num">${a.n_gaussians}</td>
+      <td class="num">${(a.label_rate*100).toFixed(1)}%</td>`;
     tbody.appendChild(tr);
   });
 
-  // evaluation
   const evTbody = $('eval-table').querySelector('tbody');
   evTbody.innerHTML = '';
-  const evaluation = m.evaluation || {};
-  const evalObjs = Object.keys(evaluation);
-  if (!evalObjs.length) {
-    evTbody.innerHTML = '<tr><td colspan="4" style="color:var(--muted)">no eval_results.json yet (annotate GT, then run scripts/run_evaluation.py)</td></tr>';
+  const ev = m.evaluation || {};
+  const evKeys = Object.keys(ev);
+  if (!evKeys.length) {
+    evTbody.innerHTML = '<tr><td colspan="4" style="color:var(--muted);font-style:italic">No eval_results.json yet</td></tr>';
   } else {
-    evalObjs.forEach(name => {
-      const s = evaluation[name];
+    evKeys.forEach(name => {
+      const s = ev[name];
       const tr = document.createElement('tr');
       tr.innerHTML = `<td>${name}</td>
         <td class="num">${(+s.mean_iou).toFixed(3)}</td>
@@ -237,150 +349,178 @@ function renderMetrics(m) {
     });
   }
 
-  // run metrics
-  const rm = m.run_metrics;
-  $('metrics-pre').textContent = rm ? JSON.stringify(rm, null, 2) :
-    (m.metadata && m.metadata.mode ? `mode: ${m.metadata.mode} (single-image run — no multi-view metrics)` : 'no run yet');
+  $('metrics-pre').textContent = m.run_metrics
+    ? JSON.stringify(m.run_metrics, null, 2)
+    : (m.metadata?.mode ? `mode: ${m.metadata.mode}\n(single-image run)` : 'no run yet');
 }
 
-async function refreshAll() {
-  const st = await api('/api/status');
+// ── Render status / checklist ─────────────────────────────────────────────────
+function renderStatus(st) {
   const b = st.backends || {};
-  $('badge-backend').textContent = `segmenter: ${b.sam2 ? 'SAM2' : 'classical (CPU)'}`;
-  $('badge-backend').className = 'badge ' + (b.sam2 ? 'ok' : '');
+  const bel = $('badge-backend');
+  if (bel) {
+    bel.textContent = `segmenter: ${b.sam2 ? 'SAM 2' : 'classical CPU'}`;
+    bel.className   = 'nbadge ' + (b.sam2 ? 'ok' : '');
+  }
   if (!b.torch) {
-    const opt = $('backend-select').querySelector('option[value="sam2"]');
-    opt.disabled = true; opt.textContent = 'SAM2 (torch missing)';
+    const opt = $('backend-select')?.querySelector('option[value="sam2"]');
+    if (opt) { opt.disabled = true; opt.textContent = 'SAM 2 (torch not installed)'; }
   }
 
+  const inp = st.inputs || {};
+  function setCI(id, ok) {
+    const el = $(id); if (!el) return;
+    el.classList.toggle('ok',  ok);
+    el.classList.toggle('err', !ok);
+  }
+  setCI('ci-colmap',  inp.colmap_data);
+  setCI('ci-ply',     inp.trained_ply);
+  setCI('ci-masks',   inp.masks);
+  setCI('ci-outputs', inp.semantic_outputs);
+}
+
+// ── Refresh all ───────────────────────────────────────────────────────────────
+async function refreshAll() {
+  const st = await api('/api/status');
+  renderStatus(st);
   try {
     renderScene(await api('/api/scene'));
-  } catch (e) {
+  } catch {
     sceneData = null;
-    $('mode-line').textContent = 'no semantic outputs yet — segment an image or run the pipeline';
-    $('stat-points').textContent = '–';
-    $('stat-shown').textContent = '–';
+    $('stat-points').textContent  = '–';
+    $('stat-shown').textContent   = '–';
     $('stat-objects').textContent = '–';
+    const ov = $('scene-empty-overlay');
+    if (ov) ov.style.display = '';
   }
   renderMetrics(await api('/api/metrics'));
 }
 
-// ------------------------------------------------------------ events
+// ── Events ────────────────────────────────────────────────────────────────────
 function bindEvents() {
-  $('conf-slider').addEventListener('input', (e) => {
+  // Confidence
+  $('conf-slider').addEventListener('input', e => {
     minConfidence = parseFloat(e.target.value);
     $('conf-val').textContent = minConfidence.toFixed(2);
     updatePointCloud();
   });
 
+  // File upload + drag-drop
+  const zone = $('upload-zone');
   $('btn-choose').addEventListener('click', () => $('file-input').click());
-  $('file-input').addEventListener('change', (e) => {
-    const f = e.target.files[0];
-    if (!f) return;
+
+  zone.addEventListener('dragover',  e => { e.preventDefault(); zone.style.borderColor='var(--sky)'; });
+  zone.addEventListener('dragleave', ()=> { zone.style.borderColor=''; });
+  zone.addEventListener('drop', e => {
+    e.preventDefault(); zone.style.borderColor = '';
+    const f = e.dataTransfer.files[0];
+    if (f?.type.startsWith('image/')) loadPreview(f);
+  });
+  $('file-input').addEventListener('change', e => {
+    const f = e.target.files[0]; if (f) loadPreview(f);
+  });
+
+  function loadPreview(f) {
     window._pendingFile = f;
     const img = $('preview');
     img.src = URL.createObjectURL(f);
     img.hidden = false;
+    $('upload-ph').style.display = 'none';
     $('btn-segment').disabled = false;
-  });
+  }
 
+  // Segment
   $('btn-segment').addEventListener('click', async () => {
-    const f = window._pendingFile;
-    if (!f) return;
-    const status = $('segment-status');
-    status.className = 'status';
-    status.textContent = 'segmenting (real backend, may take a moment)…';
+    const f = window._pendingFile; if (!f) return;
+    const st = $('segment-status');
+    st.className   = 'status-pill';
+    st.textContent = '⏳ Segmenting…';
     $('btn-segment').disabled = true;
     try {
-      const dataURI = await new Promise((resolve, reject) => {
-        const r = new FileReader();
-        r.onload = () => resolve(r.result);
-        r.onerror = reject;
-        r.readAsDataURL(f);
+      const dataURI = await new Promise((res, rej) => {
+        const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(f);
       });
       const r = await api('/api/segment', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({
-          image: dataURI,
-          filename: f.name,
+          image: dataURI, filename: f.name,
           backend: $('backend-select').value,
-          max_objects: parseInt($('max-objects').value, 10) || 8,
+          max_objects: parseInt($('max-objects').value,10)||8,
         }),
       });
-      status.className = 'status ok';
-      status.textContent = `${r.n_objects} objects · backend=${r.backend} · ${r.mode}`;
+      st.className   = 'status-pill ok';
+      st.textContent = `✓ ${r.n_objects} objects · backend=${r.backend} · ${r.mode}`;
       renderScene(r.scene);
-      toast('segmentation complete', true);
+      toast('Segmentation complete ✓', true);
     } catch (e) {
-      status.className = 'status err';
-      status.textContent = e.message;
-      toast(`segmentation failed: ${e.message}`);
+      st.className   = 'status-pill err';
+      st.textContent = `✗ ${e.message}`;
+      toast(`Segmentation failed: ${e.message}`);
     } finally {
       $('btn-segment').disabled = false;
     }
   });
 
+  // Pipeline run
   $('btn-run').addEventListener('click', async () => {
-    const status = $('pipeline-status');
-    status.className = 'status';
-    status.textContent = 'running association…';
+    const st = $('pipeline-status');
+    st.className   = 'status-pill';
+    st.textContent = '⏳ Running 2D→3D association…';
     try {
       const r = await api('/api/pipeline/run', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({
           strategy: $('strategy-select').value,
-          min_views: parseInt($('min-views').value, 10) || 1,
+          min_views: parseInt($('min-views').value,10)||1,
         }),
       });
-      status.className = 'status ok';
-      status.textContent = `${(r.metrics.label_rate * 100).toFixed(1)}% labeled (${r.metrics.n_labeled}/${r.metrics.n_gaussians})`;
+      st.className   = 'status-pill ok';
+      st.textContent = `✓ ${(r.metrics.label_rate*100).toFixed(1)}% labeled (${r.metrics.n_labeled}/${r.metrics.n_gaussians})`;
       renderScene(await api('/api/scene'));
       renderMetrics(await api('/api/metrics'));
     } catch (e) {
-      status.className = 'status err';
-      status.textContent = e.message;
-      toast(`pipeline failed: ${e.message}`);
+      st.className   = 'status-pill err';
+      st.textContent = `✗ ${e.message}`;
+      toast(`Pipeline failed: ${e.message}`);
     }
   });
 
+  // Ablation
   $('btn-ablation').addEventListener('click', async () => {
-    const status = $('pipeline-status');
-    status.className = 'status';
-    status.textContent = 'running ablation sweep…';
+    const st = $('pipeline-status');
+    st.className='status-pill'; st.textContent='⏳ Ablation sweep…';
     try {
-      await api('/api/pipeline/ablation', { method: 'POST' });
-      status.className = 'status ok';
-      status.textContent = 'ablation complete';
+      await api('/api/pipeline/ablation',{method:'POST'});
+      st.className='status-pill ok'; st.textContent='✓ Ablation complete';
       renderScene(await api('/api/scene'));
       renderMetrics(await api('/api/metrics'));
     } catch (e) {
-      status.className = 'status err';
-      status.textContent = e.message;
-      toast(`ablation failed: ${e.message}`);
+      st.className='status-pill err'; st.textContent=`✗ ${e.message}`;
+      toast(`Ablation failed: ${e.message}`);
     }
   });
 
+  // Object visibility
   $('btn-show-all').addEventListener('click', () => { visibleObjects.clear(); updatePointCloud(); });
   $('btn-hide-all').addEventListener('click', () => {
-    // hide everything except nothing = show nothing (reset with Show all)
-    Object.keys(sceneData?.label_names || {}).forEach(id => visibleObjects.add(Number(id)));
+    Object.keys(sceneData?.label_names||{}).forEach(id=>visibleObjects.add(Number(id)));
     updatePointCloud();
   });
 
+  // Camera
   $('btn-view-orbit').addEventListener('click', () => frameCamera('orbit'));
-  $('btn-view-top').addEventListener('click', () => frameCamera('top'));
-  $('btn-view-side').addEventListener('click', () => frameCamera('side'));
+  $('btn-view-top').addEventListener('click',   () => frameCamera('top'));
+  $('btn-view-side').addEventListener('click',  () => frameCamera('side'));
+  $('btn-reset-cam').addEventListener('click',  () => {
+    camera.position.set(0,2,7); controls.target.set(0,0,0); controls.update();
+  });
 }
 
-// ------------------------------------------------------------ boot
+// ── Boot ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
+  initTabs();
   initThree();
   bindEvents();
-  try {
-    await refreshAll();
-  } catch (e) {
-    toast(`server unreachable: ${e.message}`);
-  }
+  try { await refreshAll(); }
+  catch (e) { toast(`Server unreachable: ${e.message}`); }
 });
